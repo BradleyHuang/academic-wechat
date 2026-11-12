@@ -1,0 +1,571 @@
+# academic-wechat
+
+将学术论文转化为适合微信公众号发布的科普推文。
+
+## 触发条件
+
+- 用户说"公众号推文"、"科普推文"、"微信文章"
+- 用户要求把论文写成公众号风格
+- 用户提供论文PDF并要求推广
+
+## 工作流程
+
+### 1. 读取论文
+
+#### 方法一：使用markitdown（推荐）
+markitdown是微软开发的PDF转Markdown工具，已预装在系统中，可直接使用：
+
+```bash
+markitdown "论文路径.pdf"
+```
+
+**示例：**
+```bash
+markitdown "E:\Mimo\公众号\2023 PR Arndt\2023-Arndt-PR-关注-How did the continental crust form.pdf"
+```
+
+**特点：**
+- 无需安装额外Python库
+- 输出为纯文本格式
+- 适合文本密集的学术论文
+
+#### 方法二：使用PyMuPDF
+如果markitdown提取效果不佳，可尝试PyMuPDF：
+
+```python
+import fitz  # PyMuPDF
+doc = fitz.open("论文路径.pdf")
+for page in doc:
+    print(page.get_text())
+```
+
+#### 提取后处理
+- 提取关键信息：标题、作者、摘要、方法、结果、结论
+- 不自动裁剪图片（由用户手动处理）
+
+### 1.5 生成图片裁剪清单
+- 分析论文PDF，识别关键图表
+- **最多选择5张最能说明核心发现的图片**（公众号阅读体验考虑）
+- 优先选择：研究区域图、代表性样品/矿物照片、核心数据图、P-T路径图、机制/模型示意图
+- 生成`图片裁剪清单.md`文件，列出：
+  - 需要哪些图（Fig.1, Fig.2...）
+  - 每张图的内容描述
+  - 建议裁剪区域（页码、大致位置）
+  - 文件命名规范
+  - 存放目录
+- 用户根据清单手动裁剪并放入指定目录
+- 等待用户确认图片就绪后继续
+
+### 2. 分析论文亮点
+- 核心发现是什么？
+- 为什么重要？
+- 有哪些突破性意义？
+- 和现有研究有何不同？
+
+### 3. 转化为科普语言
+- 去掉专业术语，用通俗语言解释
+- 用类比和比喻帮助理解
+- 突出"为什么重要"和"有什么意义"
+- 保持科学准确性
+
+### 4. 生成HTML排版推文
+- 保存为`推文-{作者姓}{年份}.html`
+- 同时保存markdown版本`推文-{作者姓}{年份}.md`
+- 图片保存在`论文原图/`目录
+- **必须在 `.footer` 末尾添加 `.footer-source` 论文来源声明**，格式：
+
+```html
+<p class="footer-source">本文由学术论文 {作者姓} et al. ({年份}) <em>{期刊名}</em> 改写<br>仅供科普传播，详细信息请查阅原文</p>
+```
+
+### 5. 截图转为图片
+HTML生成后，自动用 Playwright 截图，输出完整长图和分段图供微信公众号使用。
+
+#### 截图步骤
+1. 用 Playwright 打开 HTML 文件（viewport 宽度 680px, device_scale_factor=2 保证高清）
+2. 等待页面加载及字体就绪
+3. 截取 **full_page** 长截图，保存为 `推文截图/推文-完整.png`
+4. 将长图按 **每段 3200px 高度** 切割，保存为 `推文截图/推文-部分{1..N}.png`
+5. 清理临时脚本文件
+
+#### 依赖（确保已安装）
+```python
+pip install playwright Pillow
+python -m playwright install chromium
+```
+
+#### 截图脚本模板
+```python
+# render_html_to_image.py
+import asyncio, os
+from playwright.async_api import async_playwright
+from PIL import Image
+
+HTML = "推文-{作者姓}{年份}.html"
+OUT = "推文截图"
+VIEWPORT_W = 680
+PART_H = 3200
+
+async def main():
+    os.makedirs(OUT, exist_ok=True)
+    async with async_playwright() as p:
+        browser = await p.chromium.launch()
+        page = await browser.new_page(viewport={"width": VIEWPORT_W, "height": 800}, device_scale_factor=2)
+        await page.goto(f"file://{os.path.abspath(HTML)}", wait_until="networkidle")
+        await page.wait_for_timeout(2000)
+        full = os.path.join(OUT, "推文-完整.png")
+        await page.screenshot(path=full, full_page=True)
+        await browser.close()
+
+    # Split into parts
+    img = Image.open(full)
+    w, h = img.size
+    parts = (h + PART_H - 1) // PART_H
+    for i in range(parts):
+        top = i * PART_H
+        bottom = min(top + PART_H, h)
+        img.crop((0, top, w, bottom)).save(os.path.join(OUT, f"推文-部分{i+1}.png"))
+    print(f"Done: {parts} parts, {full}")
+
+asyncio.run(main())
+```
+
+#### 截图完成后提示用户
+- 告知用户输出目录 `推文截图/`
+- 列出完整长图和各分段图片
+- 提醒：公众号编辑器中直接插入 `推文-部分1~N.png`
+
+### 6. 生成导读txt
+截图完成后，为每个中文推文生成一段导读（摘要），保存为txt文件，方便用户直接复制到公众号文章开头。
+
+#### 导读格式
+- 文件名：`导读-{作者姓}.txt`
+- 内容：一段话（约200-300字），涵盖以下要素：
+  1. **论文基本信息**：标题、作者团队、期刊
+  2. **研究问题**：解决什么科学问题
+  3. **核心方法**：用了什么手段
+  4. **主要发现**：最重要的结论（附关键数据）
+  5. **科学意义**：为什么重要
+- 语言风格：介于学术摘要和科普之间，专业但易读
+- 如果是Perspectives/评述文章，导读应说明与原研究的关系
+
+#### 导读模板
+```
+【{期刊}】{作者团队}：{论文标题}
+
+{一段话导读，包含研究问题、方法、核心发现和意义。}
+```
+
+## HTML排版规范
+
+### 基础结构
+```html
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>{推文标题}</title>
+    <style>/* 样式 */</style>
+</head>
+<body>
+    <div class="container">
+        <!-- 内容 -->
+    </div>
+</body>
+</html>
+```
+
+### 必需样式类
+
+| 类名 | 用途 | 样式 |
+|------|------|------|
+| `.container` | 内容容器 | max-width: 680px, 白色背景, padding: 30px 24px |
+| `.title` | 主标题 | 24px, 居中, 粗体, #1a1a1a |
+| `.subtitle` | 副标题 | 20px, 居中, #666, 下边框 |
+| `h2` | 章节标题 | 20px, #c0392b, 左边框4px |
+| `h3` | 小标题 | 20px, #2c3e50 |
+| `p` | 正文段落 | 20px, 两端对齐, margin-bottom: 16px |
+| `.highlight` | 强调文字 | #c0392b, 粗体 |
+| `.figure-container` | 图片容器 | 居中, margin: 24px 0 |
+| `.figure-caption` | 图注 | 20px, #666, 浅灰背景 |
+| `.box` | 重点提示框 | 浅黄背景, 左边框橙色 |
+| `.data-grid` | 数据卡片网格 | 2列grid布局 |
+| `.data-card` | 数据卡片 | 浅灰背景, 圆角8px |
+| `.data-value` | 数据数值 | 28px, #c0392b, 粗体 |
+| `.data-label` | 数据标签 | 20px, #666 |
+| `.arrow-steps` | 步骤流程 | 垂直排列 |
+| `.arrow-step` | 单个步骤 | flex布局, 圆形编号 |
+| `.arrow-num` | 步骤编号 | 28px圆形, #c0392b背景 |
+| `.significance` | 意义板块 | 渐变背景(#667eea→#764ba2), 白色文字 |
+| `.model-box` | 模型/观点框 | 有`.model-subduction`(蓝)和`.model-nosubduction`(红)两种 |
+| `.challenge-box` | 挑战/问题框 | 浅红背景, 红色边框 |
+| `.reference` | 参考文献 | 20px, #888, 上边框 |
+| `.author-info` | 作者信息 | 20px, #666 |
+| `.footer` | 页脚 | 居中, 20px, #999 |
+| `.footer-source` | 论文来源声明 | 20px, #aaa, 居中, 上边距 |
+
+### 完整CSS模板
+
+```css
+* {
+    margin: 0;
+    padding: 0;
+    box-sizing: border-box;
+}
+body {
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei", sans-serif;
+    background: #f5f5f5;
+    color: #333;
+    line-height: 1.8;
+}
+.container {
+    max-width: 680px;
+    margin: 0 auto;
+    background: #fff;
+    padding: 30px 24px;
+}
+.title {
+    font-size: 24px;
+    font-weight: bold;
+    color: #1a1a1a;
+    text-align: center;
+    margin-bottom: 10px;
+    line-height: 1.4;
+}
+.subtitle {
+    font-size: 20px;
+    color: #666;
+    text-align: center;
+    margin-bottom: 30px;
+    padding-bottom: 20px;
+    border-bottom: 1px solid #eee;
+}
+h2 {
+    font-size: 20px;
+    font-weight: bold;
+    color: #c0392b;
+    margin: 30px 0 15px;
+    padding-left: 12px;
+    border-left: 4px solid #c0392b;
+}
+h3 {
+    font-size: 20px;
+    font-weight: bold;
+    color: #2c3e50;
+    margin: 20px 0 10px;
+}
+p {
+    font-size: 20px;
+    margin-bottom: 16px;
+    text-align: justify;
+}
+.highlight {
+    color: #c0392b;
+    font-weight: bold;
+}
+.figure-container {
+    margin: 24px 0;
+    text-align: center;
+}
+.figure-container img {
+    max-width: 100%;
+    border-radius: 4px;
+    box-shadow: 0 2px 8px rgba(0,0,0,0.1);
+}
+.figure-caption {
+    font-size: 20px;
+    color: #666;
+    margin-top: 10px;
+    text-align: left;
+    line-height: 1.6;
+    padding: 10px;
+    background: #f9f9f9;
+    border-radius: 4px;
+}
+.box {
+    background: #fef9e7;
+    border-left: 4px solid #f39c12;
+    padding: 16px;
+    margin: 20px 0;
+    border-radius: 0 4px 4px 0;
+}
+.box-title {
+    font-weight: bold;
+    color: #e67e22;
+    margin-bottom: 8px;
+}
+.model-box {
+    padding: 16px;
+    margin: 16px 0;
+    border-radius: 4px;
+}
+.model-subduction {
+    background: #e8f4f8;
+    border-left: 4px solid #3498db;
+}
+.model-nosubduction {
+    background: #fde8e8;
+    border-left: 4px solid #e74c3c;
+}
+.model-title {
+    font-weight: bold;
+    margin-bottom: 8px;
+}
+.model-subduction .model-title { color: #2980b9; }
+.model-nosubduction .model-title { color: #c0392b; }
+.data-grid {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 16px;
+    margin: 20px 0;
+}
+.data-card {
+    background: #f8f9fa;
+    padding: 16px;
+    border-radius: 8px;
+    text-align: center;
+}
+.data-value {
+    font-size: 28px;
+    font-weight: bold;
+    color: #c0392b;
+}
+.data-label {
+    font-size: 20px;
+    color: #666;
+    margin-top: 4px;
+}
+.arrow-steps {
+    margin: 20px 0;
+}
+.arrow-step {
+    display: flex;
+    align-items: center;
+    margin-bottom: 12px;
+}
+.arrow-num {
+    width: 28px;
+    height: 28px;
+    background: #c0392b;
+    color: #fff;
+    border-radius: 50%;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 20px;
+    font-weight: bold;
+    flex-shrink: 0;
+}
+.arrow-text {
+    margin-left: 12px;
+    font-size: 20px;
+}
+.significance {
+    background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+    color: #fff;
+    padding: 20px;
+    border-radius: 8px;
+    margin: 24px 0;
+}
+.significance h3 {
+    color: #fff;
+    margin-bottom: 12px;
+}
+.significance-item {
+    display: flex;
+    align-items: flex-start;
+    margin-bottom: 12px;
+}
+.significance-num {
+    width: 28px;
+    height: 28px;
+    background: rgba(255,255,255,0.2);
+    border-radius: 50%;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 20px;
+    font-weight: bold;
+    flex-shrink: 0;
+    margin-right: 10px;
+    margin-top: 2px;
+}
+.significance-text {
+    font-size: 20px;
+    line-height: 1.6;
+}
+.reference {
+    font-size: 20px;
+    color: #888;
+    margin-top: 30px;
+    padding-top: 20px;
+    border-top: 1px solid #eee;
+}
+.reference strong {
+    color: #555;
+}
+.author-info {
+    font-size: 20px;
+    color: #666;
+    margin-top: 16px;
+    line-height: 1.8;
+}
+.footer {
+    text-align: center;
+    margin-top: 30px;
+    padding-top: 20px;
+    border-top: 1px solid #eee;
+    font-size: 20px;
+    color: #999;
+}
+.footer-source {
+    text-align: center;
+    margin-top: 10px;
+    font-size: 20px;
+    color: #aaa;
+    line-height: 1.6;
+}
+ul {
+    margin: 10px 0;
+    padding-left: 20px;
+}
+li {
+    font-size: 20px;
+    margin-bottom: 8px;
+}
+strong {
+    color: #2c3e50;
+}
+.challenge-box {
+    background: #fff5f5;
+    border: 1px solid #feb2b2;
+    padding: 16px;
+    border-radius: 8px;
+    margin: 12px 0;
+}
+.challenge-title {
+    font-weight: bold;
+    color: #c53030;
+    margin-bottom: 6px;
+}
+.challenge-text {
+    font-size: 20px;
+    color: #555;
+}
+```
+
+## 推文结构模板
+
+```html
+<h1 class="title">{引人入胜的标题}</h1>
+<p class="subtitle">{副标题，点明核心发现}</p>
+
+<h2>引言</h2>
+<!-- 问题引入，为什么这个研究重要 -->
+
+<h2>研究背景</h2>
+<!-- 两种对立观点，用.model-box展示 -->
+
+<h2>关键问题</h2>
+<!-- 如何区分这两种观点 -->
+
+<h2>研究方法</h2>
+<!-- 通俗解释方法原理 -->
+
+<h2>主要发现</h2>
+<!-- 用.data-grid展示核心数据 -->
+<!-- 用.figure-container展示论文图片 -->
+
+<h2>机制解释</h2>
+<!-- 用.arrow-steps展示过程 -->
+
+<h2>挑战/争议</h2>
+<!-- 用.challenge-box展示不同观点 -->
+
+<h2>科学意义</h2>
+<!-- 用.significance展示重要性 -->
+
+<h2>结语</h2>
+<!-- 总结和展望 -->
+
+<!-- .reference + .author-info + .footer（必须包含 .footer-source） -->
+```
+
+## 标题写作技巧
+
+1. **疑问式**：XX竟然是这样形成的？
+2. **数字式**：40亿年前的地球...
+3. **反转式**：科学家发现...竟然是错的
+4. **悬念式**：这个发现颠覆了教科书
+5. **对比式**：从X到Y：揭示...的演化
+
+## 正文写作原则
+
+1. **去术语化**：用"氧化性"代替"fO2"，用"含水量"代替"H2O含量"
+2. **类比法**：把抽象概念比作日常生活事物
+3. **故事化**：按时间线或逻辑线组织内容
+4. **重点突出**：用.highlight强调关键信息
+5. **图文配合**：每个核心发现配一张图
+
+## 图片处理流程
+
+### 第一步：生成图片裁剪清单
+读取论文PDF后，生成`图片裁剪清单.md`文件，格式如下（如果已经有论文原图目录，则读取目录下的照片即可）：
+
+```markdown
+# 图片裁剪清单
+
+## 论文信息
+- **标题**：{论文标题}
+- **作者**：{第一作者姓氏}{年份}
+
+## 需要裁剪的图片
+
+### Fig. 1: {图标题}
+- **内容**：{简要描述这张图展示什么}
+- **页码**：第X页
+- **位置**：{页面中的位置，如"左上角"、"整个页面下半部分"}
+- **裁剪建议**：{具体要裁哪些部分，如"只裁图表部分，去掉图注"}
+- **文件名**：`Fig1.png`
+
+### Fig. 2: {图标题}
+- **内容**：{描述}
+- **页码**：第X页
+- **位置**：{位置}
+- **裁剪建议**：{建议}
+- **文件名**：`Fig2.png`
+
+{继续列出所有需要的图...}
+
+## 文件存放目录
+将裁剪好的图片放入：`{论文所在目录}/论文原图/`
+
+## 文件命名规范
+- 主图：`Fig{编号}.png`（如 Fig1.png, Fig2.png）
+- 子图：`Fig{编号}{子图字母}.png`（如 Fig1a.png, Fig1b.png）
+
+## 裁剪完成后
+请告知"图片已就绪"，我将继续生成推文。
+```
+
+### 第二步：等待用户确认
+- 用户手动裁剪图片并放入`论文原图/`目录
+- 用户说"图片已就绪"或类似确认
+
+### 第三步：验证图片
+- 检查`论文原图/`目录中的图片
+- 确认文件名与清单一致
+- 开始生成推文
+
+## 图片引用规范
+
+推文中引用图片使用相对路径：
+```html
+<div class="figure-container">
+    <img src="论文原图/Fig1.png" alt="Fig.1: {图标题}">
+    <div class="figure-caption">
+        <strong>Fig. 1</strong> | {图的中文说明}. 图片来源：{作者}, {年份}, <em>{期刊}</em>.
+    </div>
+</div>
+```
